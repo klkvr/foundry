@@ -14,7 +14,7 @@ use std::path::Path;
 use yansi::Paint;
 
 pub mod vanity;
-use vanity::VanityArgs;
+use vanity::VanitySubcommands;
 
 /// CLI arguments for `cast wallet`.
 #[derive(Debug, Parser)]
@@ -37,10 +37,6 @@ pub enum WalletSubcommands {
         #[clap(long, requires = "path", env = "CAST_PASSWORD", value_name = "PASSWORD")]
         unsafe_password: Option<String>,
     },
-
-    /// Generate a vanity address.
-    #[clap(visible_alias = "va")]
-    Vanity(VanityArgs),
 
     /// Convert a private key to an address.
     #[clap(visible_aliases = &["a", "addr"])]
@@ -115,6 +111,13 @@ pub enum WalletSubcommands {
     /// List all the accounts in the keystore default directory
     #[clap(visible_alias = "ls")]
     List,
+
+    /// Tools for generation of vanity addresses
+    #[clap(visible_alias = "va")]
+    Vanity {
+        #[clap(subcommand)]
+        command: VanitySubcommands,
+    },
 }
 
 impl WalletSubcommands {
@@ -149,8 +152,8 @@ impl WalletSubcommands {
                     println!("Private key: 0x{}", hex::encode(wallet.signer().to_bytes()));
                 }
             }
-            WalletSubcommands::Vanity(cmd) => {
-                cmd.run()?;
+            WalletSubcommands::Vanity { command } => {
+                command.run()?;
             }
             WalletSubcommands::Address { wallet, private_key_override } => {
                 let wallet = private_key_override

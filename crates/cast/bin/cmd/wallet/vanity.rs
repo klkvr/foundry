@@ -1,23 +1,128 @@
-use clap::{builder::TypedValueParser, Parser};
+use alloy_primitives::{keccak256, Address};
+use clap::{
+    builder::{PossibleValuesParser, TypedValueParser},
+    Parser,
+};
 use ethers::{
     core::{k256::ecdsa::SigningKey, rand::thread_rng},
-    prelude::{LocalWallet, Signer},
-    types::{H160, U256},
-    utils::{get_contract_address, secret_key_to_address},
+    signers::coins_bip39::{English, Mnemonic},
+    utils::secret_key_to_address,
 };
+use ethers_core::rand::Rng;
 use eyre::Result;
-
 use foundry_utils::types::ToAlloy;
-use rayon::iter::{self, ParallelIterator};
+use rayon::{iter, iter::ParallelIterator};
 use regex::Regex;
 use std::time::Instant;
 
-/// Type alias for the result of [generate_wallet].
-pub type GeneratedWallet = (SigningKey, H160);
+#[derive(Debug, Parser)]
+pub enum VanitySubcommands {
+    /// Generate a private key for address by given prefix and/or suffix.
+    #[clap(visible_alias = "pk")]
+    PrivateKey {
+        #[clap(flatten)]
+        args: VanityOpts,
+    },
+    /// Generate a mnemonic for address by given prefix and/or suffix.
+    #[clap(visible_aliases = &["m", "mnemo"])]
+    Mnemonic {
+        /// Number of words in the mnemonic
+        #[clap(long, default_value = "12", value_parser = PossibleValuesParser::new(&[
+            "12", "15", "18", "21", "24"
+        ]).map(|s| s.parse::<usize>().unwrap()))]
+        words: usize,
+
+        #[clap(flatten)]
+        args: VanityOpts,
+    },
+    /// Generate CREATE2 salt for address by given prefix and/or suffix.
+    #[clap(visible_aliases = &["salt", "c2"])]
+    Create2 {
+        /// Address of the contract deployer
+        #[clap(
+            short,
+            long,
+            default_value = "0x4e59b44847b379578588920ca78fbf26c0b4956c",
+            value_name = "ADDRESS"
+        )]
+        deployer: Address,
+
+        /// Init code of the contract to be deployed.
+        #[clap(short, long, value_name = "HEX")]
+        init_code: Option<String>,
+
+        /// Init code hash of the contract to be deployed.
+        #[clap(alias = "ch", long, value_name = "HASH")]
+        init_code_hash: Option<String>,
+
+        #[clap(flatten)]
+        args: VanityOpts,
+    },
+}
+
+impl VanitySubcommands {
+    pub fn run(self) -> Result<Address> {
+        let timer = Instant::now();
+
+        let addr = match self {
+            Self::PrivateKey { args } => {
+                let generator = PrivateKeyGenerator {};
+
+                let (params, addr) = args.find_vanity(generator)?;
+
+                println!("Private key: 0x{}", hex::encode(params.key.to_bytes()));
+
+                addr
+            }
+            Self::Mnemonic { args, words } => {
+                let generator = MnemonicGenerator { words };
+
+                let (params, addr) = args.find_vanity(generator)?;
+
+                println!("Mnemonic: {}", params.mnemonic.to_phrase());
+
+                addr
+            }
+            Self::Create2 { args, deployer, init_code, init_code_hash } => {
+                if init_code.is_none() && init_code_hash.is_none() {
+                    eyre::bail!("You must provide init code or init code hash");
+                }
+
+                let init_code_hash = if let Some(init_code_hash) = init_code_hash {
+                    let mut a: [u8; 32] = [0; 32];
+                    let init_code_hash_bytes = hex::decode(init_code_hash)?;
+                    assert!(
+                        init_code_hash_bytes.len() == 32,
+                        "init code hash should be 32 bytes long"
+                    );
+                    a.copy_from_slice(&init_code_hash_bytes);
+                    a.into()
+                } else {
+                    keccak256(hex::decode(init_code.unwrap())?)
+                };
+
+                let generator =
+                    Create2Generator { deployer, init_code_hash: init_code_hash.into() };
+
+                let (params, addr) = args.find_vanity(generator)?;
+
+                println!("Salt: 0x{}", hex::encode(params.salt));
+
+                addr
+            }
+        };
+
+        println!("Address: {}", addr);
+
+        println!("Finished in {}s", timer.elapsed().as_secs());
+
+        Ok(addr)
+    }
+}
 
 /// CLI arguments for `cast wallet vanity`.
 #[derive(Debug, Clone, Parser)]
-pub struct VanityArgs {
+pub struct VanityOpts {
     /// Prefix for the vanity address.
     #[clap(
         long,
@@ -36,150 +141,196 @@ pub struct VanityArgs {
     /// nonce.
     #[clap(long)]
     pub nonce: Option<u64>,
+
+    /// Case sensitive matching.
+    #[clap(short, long)]
+    case_sensitive: bool,
 }
 
-impl VanityArgs {
-    pub fn run(self) -> Result<LocalWallet> {
-        let Self { starts_with, ends_with, nonce } = self;
+impl VanityOpts {
+    fn find_vanity<P: Sync + Send, G: WalletGenerator<Params = P>>(
+        self,
+        generator: G,
+    ) -> Result<(P, Address)> {
+        let Self { starts_with, ends_with, nonce, case_sensitive } = self;
         let mut left_exact_hex = None;
         let mut left_regex = None;
         let mut right_exact_hex = None;
         let mut right_regex = None;
 
         if let Some(prefix) = starts_with {
-            if let Ok(decoded) = hex::decode(prefix.as_bytes()) {
-                left_exact_hex = Some(decoded)
+            let decoded = hex::decode(prefix.clone());
+            if !case_sensitive && decoded.is_ok() {
+                left_exact_hex = Some(decoded.unwrap());
             } else {
                 left_regex = Some(Regex::new(&format!(r"^{prefix}"))?);
             }
         }
 
         if let Some(suffix) = ends_with {
-            if let Ok(decoded) = hex::decode(suffix.as_bytes()) {
-                right_exact_hex = Some(decoded)
+            let decoded = hex::decode(suffix.clone());
+            if !case_sensitive && decoded.is_ok() {
+                right_exact_hex = Some(decoded.unwrap());
             } else {
                 right_regex = Some(Regex::new(&format!(r"{suffix}$"))?);
             }
         }
 
         macro_rules! find_vanity {
-            ($m:ident, $nonce: ident) => {
+            ($m:ident, $g:ident, $nonce: ident) => {
                 if let Some(nonce) = $nonce {
-                    find_vanity_address_with_nonce($m, nonce)
+                    find_vanity_address_with_nonce($m, $g, nonce)
                 } else {
-                    find_vanity_address($m)
+                    find_vanity_address($m, $g)
                 }
             };
         }
 
         println!("Starting to generate vanity address...");
-        let timer = Instant::now();
-
         let wallet = match (left_exact_hex, left_regex, right_exact_hex, right_regex) {
             (Some(left), _, Some(right), _) => {
                 let matcher = HexMatcher { left, right };
-                find_vanity!(matcher, nonce)
+                find_vanity!(matcher, generator, nonce)
             }
             (Some(left), _, _, Some(right)) => {
                 let matcher = LeftExactRightRegexMatcher { left, right };
-                find_vanity!(matcher, nonce)
+                find_vanity!(matcher, generator, nonce)
             }
             (_, Some(left), _, Some(right)) => {
                 let matcher = RegexMatcher { left, right };
-                find_vanity!(matcher, nonce)
+                find_vanity!(matcher, generator, nonce)
             }
             (_, Some(left), Some(right), _) => {
                 let matcher = LeftRegexRightExactMatcher { left, right };
-                find_vanity!(matcher, nonce)
+                find_vanity!(matcher, generator, nonce)
             }
             (Some(left), None, None, None) => {
                 let matcher = LeftHexMatcher { left };
-                find_vanity!(matcher, nonce)
+                find_vanity!(matcher, generator, nonce)
             }
             (None, None, Some(right), None) => {
                 let matcher = RightHexMatcher { right };
-                find_vanity!(matcher, nonce)
+                find_vanity!(matcher, generator, nonce)
             }
             (None, Some(re), None, None) => {
                 let matcher = SingleRegexMatcher { re };
-                find_vanity!(matcher, nonce)
+                find_vanity!(matcher, generator, nonce)
             }
             (None, None, None, Some(re)) => {
                 let matcher = SingleRegexMatcher { re };
-                find_vanity!(matcher, nonce)
+                find_vanity!(matcher, generator, nonce)
             }
             _ => unreachable!(),
         }
         .expect("failed to generate vanity wallet");
-
-        println!(
-            "Successfully found vanity address in {} seconds.{}{}\nAddress: {}\nPrivate Key: 0x{}",
-            timer.elapsed().as_secs(),
-            if nonce.is_some() { "\nContract address: " } else { "" },
-            if nonce.is_some() {
-                wallet.address().to_alloy().create(nonce.unwrap()).to_checksum(None)
-            } else {
-                String::new()
-            },
-            wallet.address().to_alloy().to_checksum(None),
-            hex::encode(wallet.signer().to_bytes()),
-        );
 
         Ok(wallet)
     }
 }
 
 /// Generates random wallets until `matcher` matches the wallet address, returning the wallet.
-pub fn find_vanity_address<T: VanityMatcher>(matcher: T) -> Option<LocalWallet> {
-    wallet_generator().find_any(create_matcher(matcher)).map(|(key, _)| key.into())
+pub fn find_vanity_address<P: Sync + Send, T: VanityMatcher, G: WalletGenerator<Params = P>>(
+    matcher: T,
+    generator: G,
+) -> Option<(P, Address)> {
+    wallet_generator(generator).find_any(|(_, addr)| matcher.is_match(addr))
 }
 
 /// Generates random wallets until `matcher` matches the contract address created at `nonce`,
 /// returning the wallet.
-pub fn find_vanity_address_with_nonce<T: VanityMatcher>(
+pub fn find_vanity_address_with_nonce<
+    P: Sync + Send,
+    T: VanityMatcher,
+    G: WalletGenerator<Params = P>,
+>(
     matcher: T,
+    generator: G,
     nonce: u64,
-) -> Option<LocalWallet> {
-    let nonce: U256 = nonce.into();
-    wallet_generator().find_any(create_nonce_matcher(matcher, nonce)).map(|(key, _)| key.into())
-}
-
-/// Creates a nonce matcher function, which takes a reference to a [GeneratedWallet] and returns
-/// whether it found a match or not by using `matcher`.
-#[inline]
-pub fn create_matcher<T: VanityMatcher>(matcher: T) -> impl Fn(&GeneratedWallet) -> bool {
-    move |(_, addr)| matcher.is_match(addr)
-}
-
-/// Creates a nonce matcher function, which takes a reference to a [GeneratedWallet] and a nonce and
-/// returns whether it found a match or not by using `matcher`.
-#[inline]
-pub fn create_nonce_matcher<T: VanityMatcher>(
-    matcher: T,
-    nonce: U256,
-) -> impl Fn(&GeneratedWallet) -> bool {
-    move |(_, addr)| {
-        let contract_addr = get_contract_address(*addr, nonce);
+) -> Option<(P, Address)> {
+    wallet_generator(generator).find_any(|(_, addr)| {
+        let contract_addr = addr.create(nonce);
         matcher.is_match(&contract_addr)
-    }
+    })
 }
 
 /// Returns an infinite parallel iterator which yields a [GeneratedWallet].
 #[inline]
-pub fn wallet_generator() -> iter::Map<iter::Repeat<()>, fn(()) -> GeneratedWallet> {
-    iter::repeat(()).map(|_| generate_wallet())
+pub fn wallet_generator<P: Sync + Send, G: WalletGenerator<Params = P>>(
+    generator: G,
+) -> impl iter::ParallelIterator<Item = (P, Address)> {
+    iter::repeat(()).map(move |_| generator.generate())
 }
 
-/// Generates a random K-256 signing key and derives its Ethereum address.
-pub fn generate_wallet() -> GeneratedWallet {
-    let key = SigningKey::random(&mut thread_rng());
-    let address = secret_key_to_address(&key);
-    (key, address)
+/// A trait to generate wallets.
+pub trait WalletGenerator: Send + Sync + Copy {
+    type Params;
+
+    fn generate(&self) -> (Self::Params, Address);
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct PrivateKeyGenerator;
+
+#[derive(Debug, Copy, Clone)]
+pub struct MnemonicGenerator {
+    pub words: usize,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct Create2Generator {
+    pub deployer: Address,
+    pub init_code_hash: [u8; 32],
+}
+
+pub struct PrivateKeyParams {
+    pub key: SigningKey,
+}
+
+pub struct Create2Params {
+    pub salt: [u8; 32],
+}
+
+pub struct MnemonicParams {
+    pub mnemonic: Mnemonic<English>,
+}
+
+impl WalletGenerator for PrivateKeyGenerator {
+    type Params = PrivateKeyParams;
+
+    fn generate(&self) -> (Self::Params, Address) {
+        let key = SigningKey::random(&mut thread_rng());
+        let addr = secret_key_to_address(&key).to_alloy();
+        (PrivateKeyParams { key }, addr)
+    }
+}
+
+impl WalletGenerator for MnemonicGenerator {
+    type Params = MnemonicParams;
+
+    fn generate(&self) -> (Self::Params, Address) {
+        let mnemonic = Mnemonic::<English>::new_with_count(&mut thread_rng(), self.words).unwrap();
+        let derivation_path = "m/44'/60'/0'/0/0"; // first address of default derivation path
+        let derived_priv_key = mnemonic.derive_key(derivation_path, None).unwrap();
+        let addr = secret_key_to_address(derived_priv_key.as_ref()).to_alloy();
+        println!("{}", addr);
+
+        (MnemonicParams { mnemonic }, addr)
+    }
+}
+
+impl WalletGenerator for Create2Generator {
+    type Params = Create2Params;
+
+    fn generate(&self) -> (Self::Params, Address) {
+        let salt = thread_rng().gen::<[u8; 32]>();
+        let addr = self.deployer.create2(salt, self.init_code_hash);
+        (Create2Params { salt }, addr)
+    }
 }
 
 /// A trait to match vanity addresses.
 pub trait VanityMatcher: Send + Sync {
-    fn is_match(&self, addr: &H160) -> bool;
+    fn is_match(&self, addr: &Address) -> bool;
 }
 
 /// Matches start and end hex.
@@ -190,8 +341,8 @@ pub struct HexMatcher {
 
 impl VanityMatcher for HexMatcher {
     #[inline]
-    fn is_match(&self, addr: &H160) -> bool {
-        let bytes = addr.as_bytes();
+    fn is_match(&self, addr: &Address) -> bool {
+        let bytes = addr.0.as_slice();
         bytes.starts_with(&self.left) && bytes.ends_with(&self.right)
     }
 }
@@ -203,8 +354,8 @@ pub struct LeftHexMatcher {
 
 impl VanityMatcher for LeftHexMatcher {
     #[inline]
-    fn is_match(&self, addr: &H160) -> bool {
-        let bytes = addr.as_bytes();
+    fn is_match(&self, addr: &Address) -> bool {
+        let bytes = addr.0.as_slice();
         bytes.starts_with(&self.left)
     }
 }
@@ -216,8 +367,8 @@ pub struct RightHexMatcher {
 
 impl VanityMatcher for RightHexMatcher {
     #[inline]
-    fn is_match(&self, addr: &H160) -> bool {
-        let bytes = addr.as_bytes();
+    fn is_match(&self, addr: &Address) -> bool {
+        let bytes = addr.0.as_slice();
         bytes.ends_with(&self.right)
     }
 }
@@ -230,8 +381,8 @@ pub struct LeftExactRightRegexMatcher {
 
 impl VanityMatcher for LeftExactRightRegexMatcher {
     #[inline]
-    fn is_match(&self, addr: &H160) -> bool {
-        let bytes = addr.as_bytes();
+    fn is_match(&self, addr: &Address) -> bool {
+        let bytes = addr.0.as_slice();
         bytes.starts_with(&self.left) && self.right.is_match(&hex::encode(bytes))
     }
 }
@@ -244,8 +395,8 @@ pub struct LeftRegexRightExactMatcher {
 
 impl VanityMatcher for LeftRegexRightExactMatcher {
     #[inline]
-    fn is_match(&self, addr: &H160) -> bool {
-        let bytes = addr.as_bytes();
+    fn is_match(&self, addr: &Address) -> bool {
+        let bytes = addr.0.as_slice();
         bytes.ends_with(&self.right) && self.left.is_match(&hex::encode(bytes))
     }
 }
@@ -257,8 +408,8 @@ pub struct SingleRegexMatcher {
 
 impl VanityMatcher for SingleRegexMatcher {
     #[inline]
-    fn is_match(&self, addr: &H160) -> bool {
-        let addr = hex::encode(addr.as_ref());
+    fn is_match(&self, addr: &Address) -> bool {
+        let addr = addr.to_checksum(None).strip_prefix("0x").unwrap().to_owned();
         self.re.is_match(&addr)
     }
 }
@@ -271,8 +422,8 @@ pub struct RegexMatcher {
 
 impl VanityMatcher for RegexMatcher {
     #[inline]
-    fn is_match(&self, addr: &H160) -> bool {
-        let addr = hex::encode(addr.as_ref());
+    fn is_match(&self, addr: &Address) -> bool {
+        let addr = addr.to_checksum(None).strip_prefix("0x").unwrap().to_owned();
         self.left.is_match(&addr) && self.right.is_match(&addr)
     }
 }
@@ -309,27 +460,27 @@ mod tests {
 
     #[test]
     fn find_simple_vanity_start() {
-        let args: VanityArgs = VanityArgs::parse_from(["foundry-cli", "--starts-with", "00"]);
+        let args = VanitySubcommands::parse_from(["foundry-cli", "--starts-with", "00"]);
         let wallet = args.run().unwrap();
-        let addr = wallet.address();
+        let addr = wallet;
         let addr = format!("{addr:x}");
         assert!(addr.starts_with("00"));
     }
 
     #[test]
     fn find_simple_vanity_start2() {
-        let args: VanityArgs = VanityArgs::parse_from(["foundry-cli", "--starts-with", "9"]);
+        let args = VanitySubcommands::parse_from(["foundry-cli", "--starts-with", "9"]);
         let wallet = args.run().unwrap();
-        let addr = wallet.address();
+        let addr = wallet;
         let addr = format!("{addr:x}");
         assert!(addr.starts_with('9'));
     }
 
     #[test]
     fn find_simple_vanity_end() {
-        let args: VanityArgs = VanityArgs::parse_from(["foundry-cli", "--ends-with", "00"]);
+        let args = VanitySubcommands::parse_from(["foundry-cli", "--ends-with", "00"]);
         let wallet = args.run().unwrap();
-        let addr = wallet.address();
+        let addr = wallet;
         let addr = format!("{addr:x}");
         assert!(addr.ends_with("00"));
     }
