@@ -191,66 +191,40 @@ impl AsDoc for Document {
                                 writer.write_heading(&func_name)?;
                                 writer.writeln()?;
 
-                                // Write function docs
-                                writer.writeln_doc(
-                                    comments.exclude_tags(&[CommentTag::Param, CommentTag::Return]),
-                                )?;
-
-                                // Write function header
-                                writer.write_code(code)?;
-
-                                // Write function parameter comments in a table
-                                let params = func
-                                    .params
-                                    .iter()
-                                    .filter_map(|p| p.1.as_ref())
-                                    .collect::<Vec<_>>();
-                                writer.try_write_param_table(
-                                    CommentTag::Param,
-                                    &params,
-                                    &comments,
-                                )?;
-
-                                // Write function parameter comments in a table
-                                let returns = func
-                                    .returns
-                                    .iter()
-                                    .filter_map(|p| p.1.as_ref())
-                                    .collect::<Vec<_>>();
-                                writer.try_write_param_table(
-                                    CommentTag::Return,
-                                    &returns,
-                                    &comments,
-                                )?;
-
-                                writer.writeln()?;
-
-                                Ok::<(), std::fmt::Error>(())
+                                writer.try_write_function_section(func, &comments, code)
                             })?;
                         }
 
                         if let Some(events) = item.events() {
                             writer.write_subtitle("Events")?;
-                            events.into_iter().try_for_each(|(item, comments, code)| {
-                                writer.write_heading(&item.name.safe_unwrap().name)?;
-                                writer.write_section(comments, code)
+                            events.into_iter().try_for_each(|(event, comments, code)| {
+                                writer.write_heading(&event.name.safe_unwrap().name)?;
+                                writer.try_write_event_section(event, comments, code)
                             })?;
                         }
 
                         if let Some(errors) = item.errors() {
                             writer.write_subtitle("Errors")?;
-                            errors.into_iter().try_for_each(|(item, comments, code)| {
-                                writer.write_heading(&item.name.safe_unwrap().name)?;
-                                writer.write_section(comments, code)
+                            errors.into_iter().try_for_each(|(error, comments, code)| {
+                                writer.write_heading(&error.name.safe_unwrap().name)?;
+                                writer.try_write_error_section(error, comments, code)
                             })?;
                         }
 
                         if let Some(structs) = item.structs() {
                             writer.write_subtitle("Structs")?;
-                            structs.into_iter().try_for_each(|(item, comments, code)| {
-                                writer.write_heading(&item.name.safe_unwrap().name)?;
-                                writer.write_section(comments, code)
-                            })?;
+                            structs.into_iter().try_for_each(
+                                |(struct_definition, comments, code)| {
+                                    writer.write_heading(
+                                        &struct_definition.name.safe_unwrap().name,
+                                    )?;
+                                    writer.try_write_struct_section(
+                                        struct_definition,
+                                        comments,
+                                        code,
+                                    )
+                                },
+                            )?;
                         }
 
                         if let Some(enums) = item.enums() {
@@ -263,38 +237,26 @@ impl AsDoc for Document {
                     }
 
                     ParseSource::Function(func) => {
-                        // TODO: cleanup
-                        // Write function docs
-                        writer.writeln_doc(
-                            item.comments.exclude_tags(&[CommentTag::Param, CommentTag::Return]),
-                        )?;
-
-                        // Write function header
-                        writer.write_code(&item.code)?;
-
-                        // Write function parameter comments in a table
-                        let params =
-                            func.params.iter().filter_map(|p| p.1.as_ref()).collect::<Vec<_>>();
-                        writer.try_write_param_table(CommentTag::Param, &params, &item.comments)?;
-
-                        // Write function parameter comments in a table
-                        let returns =
-                            func.returns.iter().filter_map(|p| p.1.as_ref()).collect::<Vec<_>>();
-                        writer.try_write_param_table(
-                            CommentTag::Return,
-                            &returns,
-                            &item.comments,
-                        )?;
-
-                        writer.writeln()?;
+                        writer.try_write_function_section(func, &item.comments, &item.code)?;
                     }
 
-                    ParseSource::Variable(_) |
-                    ParseSource::Event(_) |
-                    ParseSource::Error(_) |
-                    ParseSource::Struct(_) |
-                    ParseSource::Enum(_) |
-                    ParseSource::Type(_) => {
+                    ParseSource::Event(event) => {
+                        writer.try_write_event_section(event, &item.comments, &item.code)?;
+                    }
+
+                    ParseSource::Error(error) => {
+                        writer.try_write_error_section(error, &item.comments, &item.code)?;
+                    }
+
+                    ParseSource::Struct(struct_definition) => {
+                        writer.try_write_struct_section(
+                            struct_definition,
+                            &item.comments,
+                            &item.code,
+                        )?;
+                    }
+
+                    ParseSource::Variable(_) | ParseSource::Enum(_) | ParseSource::Type(_) => {
                         writer.write_section(&item.comments, &item.code)?;
                     }
                 }

@@ -1,7 +1,10 @@
 use crate::{AsDoc, CommentTag, Comments, Deployment, Markdown};
 use itertools::Itertools;
 use once_cell::sync::Lazy;
-use solang_parser::pt::Parameter;
+use solang_parser::pt::{
+    ErrorDefinition, ErrorParameter, EventDefinition, EventParameter, Expression,
+    FunctionDefinition, Identifier, Parameter, StructDefinition, VariableDeclaration,
+};
 use std::fmt::{self, Display, Write};
 
 /// Solidity language name.
@@ -16,6 +19,38 @@ static PARAM_TABLE_SEPARATOR: Lazy<String> =
 const DEPLOYMENTS_TABLE_HEADERS: &[&str] = &["Network", "Address"];
 static DEPLOYMENTS_TABLE_SEPARATOR: Lazy<String> =
     Lazy::new(|| DEPLOYMENTS_TABLE_HEADERS.iter().map(|h| "-".repeat(h.len())).join("|"));
+
+#[derive(Debug)]
+pub struct TypedParameter {
+    /// The type.
+    pub ty: Expression,
+    /// The name.
+    pub name: Option<Identifier>,
+}
+
+impl From<Parameter> for TypedParameter {
+    fn from(param: Parameter) -> Self {
+        Self { ty: param.ty, name: param.name }
+    }
+}
+
+impl From<EventParameter> for TypedParameter {
+    fn from(param: EventParameter) -> Self {
+        Self { ty: param.ty, name: param.name }
+    }
+}
+
+impl From<VariableDeclaration> for TypedParameter {
+    fn from(param: VariableDeclaration) -> Self {
+        Self { ty: param.ty, name: param.name }
+    }
+}
+
+impl From<ErrorParameter> for TypedParameter {
+    fn from(param: ErrorParameter) -> Self {
+        Self { ty: param.ty, name: param.name }
+    }
+}
 
 /// The buffered writer.
 /// Writes various display items into the internal buffer.
@@ -114,12 +149,106 @@ impl BufWriter {
         self.writeln()
     }
 
+    /// Tries to write a function section to the buffer.
+    pub fn try_write_function_section(
+        &mut self,
+        function: &FunctionDefinition,
+        comments: &Comments,
+        code: &str,
+    ) -> fmt::Result {
+        // Write function docs
+        self.writeln_doc(comments.exclude_tags(&[CommentTag::Param, CommentTag::Return]))?;
+
+        // Write function header
+        self.write_code(code)?;
+
+        // Write function parameter comments in a table
+        let params: Vec<TypedParameter> = function
+            .params
+            .iter()
+            .filter_map(|p| p.1.as_ref().map(|p| p.to_owned().into()))
+            .collect();
+        self.try_write_param_table(CommentTag::Param, &params, comments)?;
+
+        // Write function parameter comments in a table
+        let returns: Vec<TypedParameter> = function
+            .returns
+            .iter()
+            .filter_map(|p| p.1.as_ref().map(|p| p.to_owned().into()))
+            .collect();
+        self.try_write_param_table(CommentTag::Return, &returns, comments)?;
+
+        self.writeln()?;
+
+        Ok(())
+    }
+
+    /// Tries to write an event section to the buffer.
+    pub fn try_write_event_section(
+        &mut self,
+        event: &EventDefinition,
+        comments: &Comments,
+        code: &str,
+    ) -> fmt::Result {
+        // Write event docs
+        self.writeln_doc(comments.exclude_tags(&[CommentTag::Param]))?;
+
+        // Write event header
+        self.write_code(code)?;
+
+        // Write event parameter comments in a table
+        let params: Vec<TypedParameter> =
+            event.fields.iter().map(|p| p.to_owned().into()).collect();
+
+        self.try_write_param_table(CommentTag::Param, &params, comments)
+    }
+
+    /// Triest to write an error section to the buffer.
+    pub fn try_write_error_section(
+        &mut self,
+        error: &ErrorDefinition,
+        comments: &Comments,
+        code: &str,
+    ) -> fmt::Result {
+        // Write error docs
+        self.writeln_doc(comments.exclude_tags(&[CommentTag::Param]))?;
+
+        // Write error header
+        self.write_code(code)?;
+
+        // Write error parameter comments in a table
+        let params: Vec<TypedParameter> =
+            error.fields.iter().map(|p| p.to_owned().into()).collect();
+
+        self.try_write_param_table(CommentTag::Param, &params, comments)
+    }
+
+    /// Tries to write a struct section to the buffer.
+    pub fn try_write_struct_section(
+        &mut self,
+        definition: &StructDefinition,
+        comments: &Comments,
+        code: &str,
+    ) -> fmt::Result {
+        // Write struct docs
+        self.writeln_doc(comments.exclude_tags(&[CommentTag::Param]))?;
+
+        // Write struct header
+        self.write_code(code)?;
+
+        // Write error parameter comments in a table
+        let params: Vec<TypedParameter> =
+            definition.fields.iter().map(|p| p.to_owned().into()).collect();
+
+        self.try_write_param_table(CommentTag::Param, &params, comments)
+    }
+
     /// Tries to write the parameters table to the buffer.
     /// Doesn't write anything if either params or comments are empty.
     pub fn try_write_param_table(
         &mut self,
         tag: CommentTag,
-        params: &[&Parameter],
+        params: &[TypedParameter],
         comments: &Comments,
     ) -> fmt::Result {
         let comments = comments.include_tag(tag.clone());
