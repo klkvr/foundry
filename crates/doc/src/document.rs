@@ -8,11 +8,17 @@ pub struct Document {
     /// The underlying parsed items.
     pub content: DocumentContent,
     /// The original item path.
+    /// {root}/src/Counter.sol
     pub item_path: PathBuf,
     /// The original item file content.
     pub item_content: String,
     /// The target path where the document will be written.
+    /// {root}/docs/src/src/Counter.sol/contract.Counter.md
     pub target_path: PathBuf,
+    /// The path relative to the output directory where the document will be written.
+    /// Used for generating links.
+    /// src/Counter.sol/contract.Counter.md
+    pub relative_path: PathBuf,
     /// The document display identity.
     pub identity: String,
     /// The preprocessors results.
@@ -30,10 +36,11 @@ pub enum DocumentContent {
 
 impl Document {
     /// Create new instance of [Document].
-    pub fn new(item_path: PathBuf, target_path: PathBuf) -> Self {
+    pub fn new(item_path: PathBuf, target_path: PathBuf, relative_path: PathBuf) -> Self {
         Self {
             item_path,
             target_path,
+            relative_path,
             item_content: String::default(),
             identity: String::default(),
             content: DocumentContent::Empty,

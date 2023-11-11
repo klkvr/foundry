@@ -138,11 +138,6 @@ impl AsDoc for Document {
                                         .as_ref()
                                         .and_then(|l| {
                                             l.get(base_ident).map(|path| {
-                                                let path = Path::new("/").join(
-                                                    path.strip_prefix("docs/src")
-                                                        .ok()
-                                                        .unwrap_or(path),
-                                                );
                                                 Markdown::Link(
                                                     &base_doc,
                                                     &path.display().to_string(),
