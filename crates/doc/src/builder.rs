@@ -99,6 +99,8 @@ impl DocBuilder {
             return Ok(())
         }
 
+        let out_dir = self.out_dir();
+
         let documents = sources
             .par_iter()
             .enumerate()
@@ -148,7 +150,7 @@ impl DocBuilder {
                     .into_iter()
                     .map(|item| {
                         let relative_path = path.strip_prefix(&self.root)?.join(item.filename());
-                        let target_path = self.config.out.join(Self::SRC).join(relative_path);
+                        let target_path = out_dir.join(Self::SRC).join(relative_path);
                         let ident = item.source.ident();
                         Ok(Document::new(path.clone(), target_path)
                             .with_content(DocumentContent::Single(item), ident))
@@ -168,7 +170,7 @@ impl DocBuilder {
                         name
                     };
                     let relative_path = path.strip_prefix(&self.root)?.join(filename);
-                    let target_path = self.config.out.join(Self::SRC).join(relative_path);
+                    let target_path = out_dir.join(Self::SRC).join(relative_path);
 
                     let identity = match filestem {
                         Some(stem) if stem.to_lowercase().contains("constants") => stem.to_owned(),
@@ -187,7 +189,7 @@ impl DocBuilder {
                     for (ident, funcs) in overloaded {
                         let filename = funcs.first().expect("no overloaded functions").filename();
                         let relative_path = path.strip_prefix(&self.root)?.join(filename);
-                        let target_path = self.config.out.join(Self::SRC).join(relative_path);
+                        let target_path = out_dir.join(Self::SRC).join(relative_path);
                         files.push(
                             Document::new(path.clone(), target_path)
                                 .with_content(DocumentContent::OverloadedFunctions(funcs), ident),
@@ -377,10 +379,9 @@ impl DocBuilder {
             if path.extension().map(|ext| ext.eq(Self::SOL_EXT)).unwrap_or_default() {
                 for file in files {
                     let ident = &file.identity;
-
                     let summary_path = file
                         .target_path
-                        .strip_prefix(self.out_dir().strip_prefix(&self.root)?.join(Self::SRC))?;
+                        .strip_prefix(self.out_dir().join(Self::SRC))?;
                     summary.write_link_list_item(
                         ident,
                         &summary_path.display().to_string(),
