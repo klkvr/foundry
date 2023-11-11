@@ -2549,6 +2549,7 @@ dependencies = [
  "foundry-compilers",
  "foundry-config",
  "foundry-utils",
+ "fs_extra",
  "futures-util",
  "itertools 0.11.0",
  "mdbook",
@@ -2557,10 +2558,12 @@ dependencies = [
  "serde",
  "serde_json",
  "solang-parser",
+ "tempfile",
  "thiserror",
  "tokio",
  "toml 0.8.8",
  "tracing",
+ "walkdir",
  "warp",
 ]
 
