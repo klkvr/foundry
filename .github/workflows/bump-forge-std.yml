@@ -9,7 +9,7 @@ on:
 
 jobs:
   update-tag:
-    name: updates forge-std tag
+    name: update forge-std tag
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
