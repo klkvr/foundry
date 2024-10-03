@@ -78,7 +78,7 @@ jobs:
         if: contains(matrix.runner_label, 'macos')
         run: |
           brew install docker colima
-          colima start
+          brew services start colima
           
 
       - name: Forge RPC cache
