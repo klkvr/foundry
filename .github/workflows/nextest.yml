@@ -77,7 +77,7 @@ jobs:
       - name: Install Docker
         if: contains(matrix.runner_label, 'macos')
         run: |
-          brew install docker
+          brew install docker colima
           colima start
           
 
